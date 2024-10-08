@@ -1,0 +1,254 @@
+import streamlit as st
+import pandas as pd
+import PyPDF2
+import re
+import io
+
+def extract_text_from_pdf(pdf_file):
+    pdf_reader = PyPDF2.PdfReader(pdf_file)
+    text = ""
+    for page in pdf_reader.pages:
+        text += page.extract_text()
+    return text
+
+def parse_financial_data(text):
+    def clean_value(value):
+        if isinstance(value, str):
+            value = value.replace(" ", "").replace(",", ".")
+        try:
+            return float(value)
+        except:
+            return value
+
+    lines = re.findall(r"^(.*?)\s+([-]?\d+(?:\s\d+)*(?:,\d+)?)\s*$", text, re.MULTILINE)
+    
+    data = {}
+    for key, value in lines:
+        key = key.strip()
+        if key not in data:
+            data[key] = clean_value(value)
+    
+    return data
+
+def calculate_financial_ratios(df):
+    ratios = pd.DataFrame(index=df.index)
+    
+    # Marges
+    ratios['Marge brute'] = (df['Chiffre d\'affaires'] - df['Coûts des revenus']) / df['Chiffre d\'affaires']
+    ratios['Marge d\'exploitation'] = df['Résultat d\'exploitation'] / df['Chiffre d\'affaires']
+    ratios['Marge nette'] = df['Résultat de l\'exercice'] / df['Chiffre d\'affaires']
+    
+    # Rotation des actifs
+    ratios['Net fixed asset turnover'] = df['Chiffre d\'affaires'] / df['Immobilisations nettes']
+    
+    # Capital Expenditure et ratio Capex/D&A
+    ratios['Capital Expenditure'] = -df.get('Acquisitions d\'immobilisations', 0)
+    ratios['Capex/D&A'] = ratios['Capital Expenditure'] / df.get('Dotations aux amortissements', 1)
+    
+    # Fonds de roulement
+    ratios['Net Working capital'] = df.get('Actif circulant', 0) - df.get('Dettes à court terme', 0)
+    
+    # Cycle de conversion de trésorerie
+    ratios['DSI'] = (df.get('Stocks', 0) / df.get('Coûts des revenus', 1)) * 365
+    ratios['DSO'] = (df.get('Créances clients', 0) / df['Chiffre d\'affaires']) * 365
+    ratios['DPO'] = (df.get('Dettes fournisseurs', 0) / df.get('Coûts des revenus', 1)) * 365
+    ratios['CCC'] = ratios['DSI'] + ratios['DSO'] - ratios['DPO']
+    
+    # Analyse du financement
+    ratios['Dette Nette'] = df.get('Dettes financières', 0) - df.get('Disponibilités', 0)
+    ratios['Equity'] = df['TOTAL CAPITAUX PROPRES']
+    ratios['IGF'] = df.get('Immobilisations', 0) + ratios['Net Working capital']
+    
+    # Analyse solvabilité
+    ratios['Effet Levier'] = ratios['Dette Nette'] / ratios['Equity']
+    ratios['Couverture de dette'] = df.get('EBITDA', 0) / ratios['Dette Nette']
+    ratios['Couverture des intérêts'] = df.get('EBIT', 0) / df.get('Charges d\'intérêts', 1)
+    
+    # Analyse Liquidité
+    ratios['Ratio court terme'] = df.get('Actif circulant', 0) / df.get('Dettes à court terme', 1)
+    ratios['Acid Test'] = (df.get('Actif circulant', 0) - df.get('Stocks', 0)) / df.get('Dettes à court terme', 1)
+    
+    # Analyse de profitabilité et de croissance
+    ratios['Capital Employed'] = df['TOTAL CAPITAUX PROPRES'] + df.get('Dettes financières à long terme', 0)
+    ratios['NOPAT'] = df.get('EBIT', 0) * (1 - df.get('Taux d\'imposition', 0.25))
+    ratios['ROCE'] = ratios['NOPAT'] / ratios['Capital Employed']
+    ratios['ROE'] = df['Résultat de l\'exercice'] / df['TOTAL CAPITAUX PROPRES']
+    
+    # Wacc et EVA (à ajuster selon vos besoins spécifiques)
+    ratios['Wacc'] = 0.0512  # Valeur fixe donnée dans votre exemple
+    ratios['EVA'] = ratios['NOPAT'] - (ratios['Wacc'] * ratios['Capital Employed'])
+    
+    return ratios
+
+def interpret_ratios(ratios):
+    interpretations = {}
+    
+    # Interprétation de la Marge brute
+    mb = ratios['Marge brute'].iloc[-1]
+    interpretations['Marge brute'] = f"La marge brute est de {mb:.2%}. "
+    if mb > 0.5:
+        interpretations['Marge brute'] += "C'est une excellente marge, indiquant une forte rentabilité des ventes."
+    elif mb > 0.3:
+        interpretations['Marge brute'] += "C'est une bonne marge, l'entreprise génère un profit satisfaisant sur ses ventes."
+    else:
+        interpretations['Marge brute'] += "Cette marge est faible, l'entreprise pourrait avoir des difficultés à couvrir ses coûts fixes."
+
+    # Interprétation du ROE
+    roe = ratios['ROE'].iloc[-1]
+    interpretations['ROE'] = f"Le ROE est de {roe:.2%}. "
+    if roe > 0.15:
+        interpretations['ROE'] += "C'est un excellent retour sur capitaux propres, indiquant une forte rentabilité pour les actionnaires."
+    elif roe > 0.10:
+        interpretations['ROE'] += "C'est un bon ROE, l'entreprise génère une rentabilité satisfaisante pour ses actionnaires."
+    else:
+        interpretations['ROE'] += "Ce ROE est faible, l'entreprise pourrait avoir des difficultés à générer de la valeur pour ses actionnaires."
+
+    # Interprétation du ROCE
+    roce = ratios['ROCE'].iloc[-1]
+    interpretations['ROCE'] = f"Le ROCE est de {roce:.2%}. "
+    if roce > 0.2:
+        interpretations['ROCE'] += "C'est un excellent retour sur capital employé, indiquant une utilisation très efficace des ressources."
+    elif roce > 0.1:
+        interpretations['ROCE'] += "C'est un bon ROCE, l'entreprise utilise efficacement ses ressources."
+    else:
+        interpretations['ROCE'] += "Ce ROCE est faible, l'entreprise pourrait avoir des difficultés à générer des rendements suffisants sur ses investissements."
+
+    # Interprétation du Cycle de Conversion de Trésorerie (CCC)
+    ccc = ratios['CCC'].iloc[-1]
+    interpretations['CCC'] = f"Le Cycle de Conversion de Trésorerie est de {ccc:.0f} jours. "
+    if ccc < 30:
+        interpretations['CCC'] += "C'est un excellent CCC, indiquant une gestion très efficace du fonds de roulement."
+    elif ccc < 60:
+        interpretations['CCC'] += "C'est un bon CCC, l'entreprise gère efficacement son fonds de roulement."
+    else:
+        interpretations['CCC'] += "Ce CCC est élevé, l'entreprise pourrait avoir des difficultés de trésorerie à court terme."
+
+    # Interprétation de l'Effet de Levier
+    levier = ratios['Effet Levier'].iloc[-1]
+    interpretations['Effet Levier'] = f"L'effet de levier est de {levier:.2f}. "
+    if levier < 1:
+        interpretations['Effet Levier'] += "L'entreprise a un faible niveau d'endettement, ce qui est généralement considéré comme sûr."
+    elif levier < 2:
+        interpretations['Effet Levier'] += "L'entreprise a un niveau d'endettement modéré, ce qui est généralement acceptable."
+    else:
+        interpretations['Effet Levier'] += "L'entreprise a un niveau d'endettement élevé, ce qui pourrait présenter un risque financier."
+
+    # Interprétation de l'EVA
+    eva = ratios['EVA'].iloc[-1]
+    interpretations['EVA'] = f"L'EVA est de {eva:,.0f}. "
+    if eva > 0:
+        interpretations['EVA'] += "L'entreprise crée de la valeur pour ses actionnaires."
+    else:
+        interpretations['EVA'] += "L'entreprise détruit de la valeur pour ses actionnaires, ce qui est préoccupant."
+
+    return interpretations
+
+def generate_recommendation(ratios):
+    issues = []
+    # Vérification des indicateurs clés de santé financière
+    if ratios['Marge brute'].iloc[-1] < 0.3:
+        issues.append("la marge brute est faible")
+    if ratios['ROE'].iloc[-1] < 0.1:
+        issues.append("le ROE est faible")
+    if ratios['ROCE'].iloc[-1] < 0.1:
+        issues.append("le ROCE est faible")
+    if ratios['CCC'].iloc[-1] > 60:
+        issues.append("le CCC est élevé")
+    if ratios['Effet Levier'].iloc[-1] > 2:
+        issues.append("l'effet de levier est élevé")
+    if ratios['EVA'].iloc[-1] < 0:
+        issues.append("l'EVA est négative")
+    
+    if not issues:
+        recommendation = "L'entreprise présente une excellente santé financière. Il est recommandé de poursuivre les investissements et les stratégies actuelles."
+    else:
+        recommendation = "L'entreprise présente des points d'attention : " + ", ".join(issues) + ". Il est conseillé de prendre des mesures pour améliorer ces aspects."
+    
+    return recommendation
+
+def main():
+    st.title("Analyse financière détaillée")
+
+    uploaded_files = st.file_uploader("Glissez-déposez vos fichiers PDF ici", accept_multiple_files=True, type=['pdf'])
+
+    if uploaded_files:
+        all_data = {}
+        for uploaded_file in uploaded_files:
+            pdf_content = uploaded_file.read()
+            text = extract_text_from_pdf(io.BytesIO(pdf_content))
+            data = parse_financial_data(text)
+            year = re.search(r"Période du (\d{2}/\d{2}/\d{4})", text)
+            if year:
+                year = year.group(1)[-4:]
+                all_data[year] = data
+            else:
+                st.warning(f"Impossible de trouver l'année pour le fichier {uploaded_file.name}")
+
+        if all_data:
+            df = pd.DataFrame(all_data).T
+
+            # Calculer les ratios financiers
+            ratios = calculate_financial_ratios(df)
+
+            # Interpréter les ratios
+            interpretations = interpret_ratios(ratios)
+
+            # Afficher les données financières brutes
+            st.header("Données financières brutes")
+            st.dataframe(df)
+
+            # Afficher les ratios financiers
+            st.header("Ratios financiers")
+            st.dataframe(ratios)
+
+            # Graphiques et interprétations pour les ratios clés
+            st.header("Analyse des ratios clés")
+            key_ratios = ['Marge brute', 'ROE', 'ROCE', 'CCC', 'Effet Levier', 'EVA']
+            for ratio in key_ratios:
+                if ratio in ratios.columns:
+                    st.subheader(ratio)
+                    st.line_chart(ratios[ratio])
+                    st.write(interpretations[ratio])
+                    
+                    # Ajouter des alertes pour les ratios préoccupants
+                    if ratio == 'Marge brute' and ratios[ratio].iloc[-1] < 0.3:
+                        st.warning("Attention : La marge brute est faible, ce qui pourrait indiquer des problèmes de rentabilité.")
+                    elif ratio == 'ROE' and ratios[ratio].iloc[-1] < 0.1:
+                        st.warning("Attention : Le ROE est faible, ce qui pourrait indiquer des problèmes de rentabilité pour les actionnaires.")
+                    elif ratio == 'ROCE' and ratios[ratio].iloc[-1] < 0.1:
+                        st.warning("Attention : Le ROCE est faible, ce qui pourrait indiquer une utilisation inefficace des ressources.")
+                    elif ratio == 'CCC' and ratios[ratio].iloc[-1] > 60:
+                        st.warning("Attention : Le CCC est élevé, ce qui pourrait indiquer des problèmes de gestion du fonds de roulement.")
+                    elif ratio == 'Effet Levier' and ratios[ratio].iloc[-1] > 2:
+                        st.warning("Attention : L'effet de levier est élevé, ce qui pourrait indiquer un risque financier important.")
+                    elif ratio == 'EVA' and ratios[ratio].iloc[-1] < 0:
+                        st.warning("Attention : L'EVA est négative, ce qui indique une destruction de valeur pour les actionnaires.")
+
+            # Analyse globale
+            st.header("Analyse globale")
+            st.write("Sur la base de l'analyse des ratios financiers, voici un résumé de la situation financière de l'entreprise :")
+
+            # Générer la préconisation en fonction de la qualité de l'entreprise
+            recommendation = generate_recommendation(ratios)
+            st.subheader("Préconisation")
+            st.write(recommendation)
+            
+            # Export des données
+            st.header("Export des données")
+            json_data = df.to_json()
+            st.download_button(
+                label="Télécharger les données brutes (JSON)",
+                data=json_data,
+                file_name="financial_data.json",
+                mime="application/json"
+            )
+            json_ratios = ratios.to_json()
+            st.download_button(
+                label="Télécharger les ratios (JSON)",
+                data=json_ratios,
+                file_name="financial_ratios.json",
+                mime="application/json"
+            )
+
+if __name__ == "__main__":
+    main()
